@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
@@ -42,33 +41,28 @@ type EmailWorker struct {
 	sender EmailSender
 }
 
-func NewEmailWorker(ctx context.Context, sender EmailSender, bufferSize int) *EmailWorker {
+func NewEmailWorker(sender EmailSender, bufferSize int) *EmailWorker {
 	w := &EmailWorker{
 		jobs:   make(chan EmailJob, bufferSize),
 		sender: sender,
 	}
-	w.wg.Add(1)
-	go w.run(ctx)
 	return w
 }
 
-func (w *EmailWorker) run(ctx context.Context) {
+// Start begins processing email jobs from the queue until the job channel is closed.
+//
+// It runs in a separate goroutine and should be started by calling Start. It drains
+// any remaining buffered jobs before returning, so callers must stop enqueuing new
+// work before calling Shutdown.
+func (w *EmailWorker) Start() {
+	w.wg.Add(1)
 	defer w.wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Email worker stopped: context cancelled")
-			return
-		case job, ok := <-w.jobs:
-			if !ok {
-				log.Println("Email worker stopped: channel closed")
-				return
-			}
-			if err := w.sender.Send(job.To, job.Subject, job.Body); err != nil {
-				log.Printf("Failed to send email to %s: %v", job.To, err)
-			}
+	for job := range w.jobs {
+		if err := w.sender.Send(job.To, job.Subject, job.Body); err != nil {
+			log.Printf("Failed to send email to %s: %v", job.To, err)
 		}
 	}
+	log.Println("Email worker stopped: queue drained")
 }
 
 var ErrQueueFull = errors.New("email queue is full")
@@ -121,7 +115,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	worker := NewEmailWorker(ctx, mockEmailSender{}, 100)
+	worker := NewEmailWorker(mockEmailSender{}, 100)
+	go worker.Start()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /signup", signupHandler(worker))
@@ -129,14 +124,14 @@ func main() {
 	server := &http.Server{Addr: ":8080", Handler: mux}
 
 	go func() {
-		fmt.Println("Listening on :8080 (POST /signup)")
+		log.Println("Listening on :8080 (POST /signup)")
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
 
 	<-ctx.Done()
-	fmt.Println("\nShutting down...")
+	log.Println("Shutting down...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -19,4 +19,5 @@ run-context-aware:
 	go run 03-context-aware/main.go
 
 run-email-use-case:
-	go run 04-email-use-case/main.go
+	go build -o bin/email-use-case 04-email-use-case/main.go
+	./bin/email-use-case
