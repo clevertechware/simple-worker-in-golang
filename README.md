@@ -10,8 +10,8 @@ A **worker** is the simplest concurrency pattern in Go: a goroutine that consume
 |---|---|---|
 | [`01-basic`](01-basic) | Minimal worker: a goroutine + a channel + `range`. Ends with a `time.Sleep` to let the output flush. | `make run-basic` |
 | [`02-waitgroup`](02-waitgroup) | Same worker, but shutdown is synchronized with a `sync.WaitGroup` instead of a sleep. | `make run-waitgroup` |
-| [`03-context-aware`](03-context-aware) | HTTP server with a `POST /signup` endpoint: the handler enqueues a welcome email on a buffered, `context`-aware `EmailWorker` and responds immediately while the (mocked) email sends in the background. Graceful shutdown on `SIGINT`/`SIGTERM`. | `make run-context-aware` |
-| [`04-advanced`](04-advanced) | A small restaurant simulation (`orders` package): a `Kitchen` that cooks orders concurrently, a `Waiter` that takes and serves them, an in-memory `OrderRepository`, and a generic `fp.Result[T]` type to carry success/failure through channels. Graceful shutdown on `SIGINT`/`SIGTERM`. | `make run-advanced` |
+| [`03-context-aware`](04-advanced) | A small restaurant simulation (`orders` package): a `Kitchen` that cooks orders concurrently, a `Waiter` that takes and serves them, an in-memory `OrderRepository`, and a generic `fp.Result[T]` type to carry success/failure through channels. Graceful shutdown on `SIGINT`/`SIGTERM`. | `make run-advanced` |
+| [`04-email-use-case`](04-email-use-case) | HTTP server with a `POST /signup` endpoint: the handler enqueues a welcome email on a buffered, `context`-aware `EmailWorker` and responds immediately while the (mocked) email sends in the background. Graceful shutdown on `SIGINT`/`SIGTERM`. | `make run-context-aware` |
 
 ## Why a single worker
 
@@ -31,8 +31,8 @@ Go 1.26 (see [`go.mod`](go.mod)).
 make build              # builds bin/basic, bin/waitgroup, bin/context-aware, bin/advanced
 make run-basic          # go run 01-basic/main.go
 make run-waitgroup      # go run 02-waitgroup/main.go
-make run-context-aware  # go run 03-context-aware/main.go
-make run-advanced       # go run 04-advanced/main.go
+make run-context-aware  # go run 03-email-use-case/main.go
+make run-email-use-case # go run 04-email-use-case/main.go
 make clean              # removes bin/
 ```
 
@@ -45,7 +45,7 @@ The `/signup` handler turns that into `503 Service Unavailable`.
 To see it in practice, start the server in one terminal:
 
 ```bash
-make run-context-aware
+make run-email-use-case
 ```
 
 Then, in another terminal, fire more concurrent signups than the buffer can hold

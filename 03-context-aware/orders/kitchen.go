@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"simple-worker-in-golang/04-advanced/fp"
+	"simple-worker-in-golang/03-context-aware/fp"
 )
 
 type Kitchen struct {

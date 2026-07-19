@@ -3,7 +3,7 @@ package orders
 import (
 	"context"
 	"errors"
-	"simple-worker-in-golang/04-advanced/fp"
+	"simple-worker-in-golang/03-context-aware/fp"
 	"testing"
 	"time"
 )

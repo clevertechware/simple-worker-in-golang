@@ -18,5 +18,5 @@ run-waitgroup:
 run-context-aware:
 	go run 03-context-aware/main.go
 
-run-advanced:
-	go run 04-advanced/main.go
+run-email-use-case:
+	go run 04-email-use-case/main.go
