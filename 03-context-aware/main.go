@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 )
 
-// --- 3. Production-style email worker ---
+// --- Email worker ---
+
 type EmailJob struct {
 	To      string
 	Subject string
@@ -19,11 +25,14 @@ type EmailSender interface {
 	Send(to, subject, body string) error
 }
 
+// mockEmailSender fakes an SMTP round trip so the /signup handler can
+// demonstrate returning immediately while the email is still "in flight".
 type mockEmailSender struct{}
 
 func (mockEmailSender) Send(to, subject, body string) error {
-	fmt.Printf("Sending email to %s: %s\n", to, subject)
-	time.Sleep(100 * time.Millisecond)
+	log.Printf("Sending email to %s: %s\n", to, subject)
+	time.Sleep(2 * time.Second)
+	log.Printf("Email sent to %s\n", to)
 	return nil
 }
 
@@ -33,27 +42,45 @@ type EmailWorker struct {
 	sender EmailSender
 }
 
-func NewEmailWorker(sender EmailSender, bufferSize int) *EmailWorker {
+func NewEmailWorker(ctx context.Context, sender EmailSender, bufferSize int) *EmailWorker {
 	w := &EmailWorker{
 		jobs:   make(chan EmailJob, bufferSize),
 		sender: sender,
 	}
 	w.wg.Add(1)
-	go w.run()
+	go w.run(ctx)
 	return w
 }
 
-func (w *EmailWorker) run() {
+func (w *EmailWorker) run(ctx context.Context) {
 	defer w.wg.Done()
-	for job := range w.jobs {
-		if err := w.sender.Send(job.To, job.Subject, job.Body); err != nil {
-			log.Printf("Failed to send email to %s: %v", job.To, err)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Email worker stopped: context cancelled")
+			return
+		case job, ok := <-w.jobs:
+			if !ok {
+				log.Println("Email worker stopped: channel closed")
+				return
+			}
+			if err := w.sender.Send(job.To, job.Subject, job.Body); err != nil {
+				log.Printf("Failed to send email to %s: %v", job.To, err)
+			}
 		}
 	}
 }
 
-func (w *EmailWorker) Enqueue(job EmailJob) {
-	w.jobs <- job
+var ErrQueueFull = errors.New("email queue is full")
+
+// Enqueue never blocks: if the buffer is full, it returns ErrQueueFull
+func (w *EmailWorker) Enqueue(job EmailJob) error {
+	select {
+	case w.jobs <- job:
+		return nil
+	default:
+		return ErrQueueFull
+	}
 }
 
 func (w *EmailWorker) Shutdown() {
@@ -61,68 +88,65 @@ func (w *EmailWorker) Shutdown() {
 	w.wg.Wait()
 }
 
-func demoEmailWorker() {
-	fmt.Println("\n=== 3. Production email worker ===")
-	worker := NewEmailWorker(mockEmailSender{}, 100)
+// --- HTTP API ---
 
-	worker.Enqueue(EmailJob{
-		To:      "alice@example.com",
-		Subject: "Bienvenue !",
-		Body:    "Votre compte est créé.",
-	})
-	worker.Enqueue(EmailJob{
-		To:      "bob@example.com",
-		Subject: "Confirmation",
-		Body:    "Votre commande est confirmée.",
-	})
-
-	worker.Shutdown()
+type signupRequest struct {
+	Email string `json:"email"`
 }
 
-// --- 4. Context-aware worker ---
-
-func contextAwareWorker(ctx context.Context, jobs <-chan string, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("Worker stopped: context cancelled")
-			return
-		case job, ok := <-jobs:
-			if !ok {
-				fmt.Println("Worker stopped: channel closed")
-				return
-			}
-			fmt.Printf("Processing: %s\n", job)
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-}
-
-func demoContextAwareWorker() {
-	fmt.Println("\n=== 4. Context-aware worker ===")
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
-
-	jobs := make(chan string)
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go contextAwareWorker(ctx, jobs, &wg)
-
-	// Send jobs until the context deadline cuts the worker off.
-	for i := 1; i <= 10; i++ {
-		select {
-		case jobs <- fmt.Sprintf("task-%d", i):
-		case <-ctx.Done():
-			wg.Wait()
+// In a real app, we would have first a transaction open with registering into the database
+// the user then, we would send the welcome email using the worker inside that transaction.
+// On rejection, we would rollback the transaction to maintain consistency.
+func signupHandler(worker *EmailWorker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req signupRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+			http.Error(w, "invalid or missing email", http.StatusBadRequest)
 			return
 		}
+
+		// The welcome email is sent in the background: the HTTP response
+		// does not wait for the 4-second mock SMTP round trip.
+		err := worker.Enqueue(EmailJob{
+			To:      req.Email,
+			Subject: "Bienvenue !",
+			Body:    "Votre compte est créé.",
+		})
+		if err != nil {
+			http.Error(w, "server busy, try again later", http.StatusServiceUnavailable)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
 	}
-	wg.Wait()
 }
 
 func main() {
-	demoEmailWorker()
-	demoContextAwareWorker()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	worker := NewEmailWorker(ctx, mockEmailSender{}, 100)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /signup", signupHandler(worker))
+
+	server := &http.Server{Addr: ":8080", Handler: mux}
+
+	go func() {
+		fmt.Println("Listening on :8080 (POST /signup)")
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	fmt.Println("\nShutting down...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	worker.Shutdown()
 }

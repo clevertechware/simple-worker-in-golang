@@ -10,7 +10,7 @@ A **worker** is the simplest concurrency pattern in Go: a goroutine that consume
 |---|---|---|
 | [`01-basic`](01-basic) | Minimal worker: a goroutine + a channel + `range`. Ends with a `time.Sleep` to let the output flush. | `make run-basic` |
 | [`02-waitgroup`](02-waitgroup) | Same worker, but shutdown is synchronized with a `sync.WaitGroup` instead of a sleep. | `make run-waitgroup` |
-| [`03-context-aware`](03-context-aware) | Two demos: a buffered `EmailWorker` (enqueue/shutdown API) and a `context`-aware worker that stops on cancellation or channel close. | `make run-context-aware` |
+| [`03-context-aware`](03-context-aware) | HTTP server with a `POST /signup` endpoint: the handler enqueues a welcome email on a buffered, `context`-aware `EmailWorker` and responds immediately while the (mocked) email sends in the background. Graceful shutdown on `SIGINT`/`SIGTERM`. | `make run-context-aware` |
 | [`04-advanced`](04-advanced) | A small restaurant simulation (`orders` package): a `Kitchen` that cooks orders concurrently, a `Waiter` that takes and serves them, an in-memory `OrderRepository`, and a generic `fp.Result[T]` type to carry success/failure through channels. Graceful shutdown on `SIGINT`/`SIGTERM`. | `make run-advanced` |
 
 ## Why a single worker
@@ -35,4 +35,37 @@ make run-context-aware  # go run 03-context-aware/main.go
 make run-advanced       # go run 04-advanced/main.go
 make clean              # removes bin/
 ```
+
+## Simulating overload (03-context-aware)
+
+`EmailWorker.Enqueue` never blocks: the `jobs` channel has a 100-slot buffer, and once
+it's full `Enqueue` returns `ErrQueueFull` immediately instead of stalling the caller.
+The `/signup` handler turns that into `503 Service Unavailable`.
+
+To see it in practice, start the server in one terminal:
+
+```bash
+make run-context-aware
+```
+
+Then, in another terminal, fire more concurrent signups than the buffer can hold
+(the mock sender takes 4s per email, so the buffer drains slowly):
+
+```bash
+for i in $(seq 1 110); do
+  (
+    code=$(curl -s -o /dev/null -w "%{http_code}" \
+      -X POST localhost:8080/signup \
+      -d "{\"email\":\"user${i}@example.com\"}")
+    if [ "$code" = "201" ]; then
+      echo "user $i created"
+    else
+      echo "user $i not created: service unavailable (HTTP $code)"
+    fi
+  )
+done
+```
+
+Expect ~101 lines of `user N created` (1 in-flight job + 100 buffered) followed by
+a handful of `user N not created: service unavailable` once the buffer fills up.
 
